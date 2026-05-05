@@ -1325,9 +1325,9 @@ function ChatComposer({
 function IntroInfoPopup() {
 	return (
 		<motion.aside
-			className="pointer-events-none fixed left-1/2 top-[42%] z-10 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 rounded-[2rem] bg-[#fff2e3] px-6 py-5 text-center text-[#3b2415] shadow-[0_18px_60px_rgba(59,36,21,0.12)]"
-			initial={{ opacity: 0, y: 12, x: "-50%" }}
-			animate={{ opacity: 1, y: 0, x: "-50%" }}
+			className="pointer-events-none fixed left-1/2 top-[20%] z-10 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-[2rem] bg-[#fff2e3] px-6 py-5 text-center text-[#3b2415] shadow-[0_18px_60px_rgba(59,36,21,0.12)]"
+			initial={{ opacity: 0, y: 12 }}
+			animate={{ opacity: 1, y: 0 }}
 			transition={{ duration: 0.24 }}
 		>
 			<p className="text-xs font-bold uppercase tracking-wide text-[#8a4d22]">
