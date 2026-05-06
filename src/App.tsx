@@ -23,10 +23,13 @@ import {
 	Eraser,
 	FileJson,
 	FileText,
+	HardDrive,
 	KeyRound,
+	LogOut,
 	Mic,
 	Paperclip,
 	Plus,
+	RefreshCw,
 	Search,
 	Send,
 	Trash2,
@@ -35,9 +38,19 @@ import {
 	UserPlus,
 	X,
 } from "lucide-react";
-import { Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import sapphireLogo from "./assets/sapphire_logo.png";
+import {
+	connectWallet,
+	decryptBlockchainPayload,
+	encryptBlockchainPayload,
+	inspectBlockchainPackage,
+	parseBlockchainProfile,
+	type BlockchainDecryptionResult,
+	type BlockchainPublicProfile,
+	type BlockchainSession,
+} from "./lib/blockchainCrypto";
 import {
 	decryptPayload,
 	encryptPayload,
@@ -95,7 +108,7 @@ interface ChatMessage {
 	notice?: Notice;
 	recipientAddress?: string;
 	recipientFingerprint?: string;
-	result?: DecryptedPayloadResult | EncryptionResult;
+	result?: BlockchainDecryptionResult | DecryptedPayloadResult | EncryptionResult;
 	role: "assistant" | "system" | "user";
 	senderAddress?: string;
 	senderFingerprint?: string;
@@ -120,7 +133,7 @@ type EncryptedChatMessage = ChatMessage & {
 };
 
 type DecryptedChatMessage = ChatMessage & {
-	result: DecryptedPayloadResult;
+	result: BlockchainDecryptionResult | DecryptedPayloadResult;
 	type: "decrypted";
 };
 
@@ -129,6 +142,8 @@ interface AttachmentDraft extends EncryptedAttachment {
 }
 
 const addressBookStorageKey = "sapphirelabs-address-book-v1";
+const storedIdentityKey = "sapphirelabs-identity-key-v1";
+const storedIdentityFileNameKey = "sapphirelabs-identity-file-name-v1";
 const maxAttachmentBytes = 10 * 1024 * 1024;
 const addressBookEmojiOptions = ["😀", "🧠", "🔐", "🚀", "📡", "🫶", "💼", "⭐"];
 const trustStatusOptions = ["unverified", "verified", "blocked"] as const;
@@ -213,6 +228,9 @@ function HomePage() {
 	);
 	const [addressBookModalOpen, setAddressBookModalOpen] = useState(false);
 	const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
+	const [storedIdentityAddress, setStoredIdentityAddress] = useState(() =>
+		loadStoredIdentityAddress(),
+	);
 
 	const passwordStrength = useMemo(
 		() => getPasswordStrength(keyPassword),
@@ -329,11 +347,10 @@ function HomePage() {
 
 			const keyPair = await generateProtectedKeyPair(keyPassword);
 			setGeneratedKey(keyPair);
-			activateSession(
-				keyPair.privateKeyFile,
-				keyPassword,
-				keyPair.privateKeyFileName,
-			);
+			setNotice({
+				tone: "success",
+				message: "Key created. Download the private key file to unlock chat.",
+			});
 		} catch (error) {
 			setNotice(toNotice(error, "Could not create the key pair."));
 		} finally {
@@ -426,7 +443,20 @@ function HomePage() {
 			}
 
 			const attachment = await fileToBase64Payload(file);
+			const isAudio = attachment.type.startsWith("audio/");
 			setAttachments((current) => [...current, attachment]);
+			if (isAudio) {
+				setAttachments((current) =>
+					current.map((currentAttachment) =>
+						currentAttachment.id === attachment.id
+							? {
+									...currentAttachment,
+									objectUrl: URL.createObjectURL(file),
+								}
+							: currentAttachment,
+					),
+				);
+			}
 		} catch (error) {
 			setNotice(toNotice(error, "Could not attach this file."));
 		}
@@ -520,11 +550,6 @@ function HomePage() {
 		} catch (error) {
 			setNotice(toNotice(error, "Could not start voice recording."));
 		}
-	}
-
-	function cancelRecording() {
-		keepRecordingRef.current = false;
-		mediaRecorderRef.current?.stop();
 	}
 
 	async function decryptPackage(packageJson: string, userLabel: string) {
@@ -753,10 +778,72 @@ function HomePage() {
 		setNotice(null);
 	}
 
+	function handleStoreIdentity() {
+		if (!sessionKey) {
+			return;
+		}
+
+		try {
+			localStorage.setItem(storedIdentityKey, stringifyJson(sessionKey.keyFile));
+			localStorage.setItem(storedIdentityFileNameKey, sessionKey.fileName);
+			setStoredIdentityAddress(sessionKey.publicAddress);
+			setNotice({
+				tone: "success",
+				message: "Encrypted private key JSON stored in this browser.",
+			});
+		} catch (error) {
+			setNotice(toNotice(error, "Could not store this identity locally."));
+		}
+	}
+
+	function handleDownloadIdentity() {
+		if (!sessionKey) {
+			return;
+		}
+
+		downloadText(
+			sessionKey.fileName,
+			stringifyJson(sessionKey.keyFile),
+			"application/json",
+		);
+	}
+
+	function handleRemoveStoredIdentity() {
+		localStorage.removeItem(storedIdentityKey);
+		localStorage.removeItem(storedIdentityFileNameKey);
+		setStoredIdentityAddress("");
+		setNotice({
+			tone: "info",
+			message: "Stored identity removed from this browser.",
+		});
+	}
+
+	function handleUseStoredIdentity() {
+		const storedIdentity = loadStoredIdentity();
+
+		if (!storedIdentity) {
+			setStoredIdentityAddress("");
+			setNotice({
+				tone: "info",
+				message: "No stored identity was found in this browser.",
+			});
+			return;
+		}
+
+		setLoadKeyFile(storedIdentity.keyFile);
+		setLoadKeyFileName(storedIdentity.fileName);
+		setLoadKeyPassword("");
+		setMode("load-key");
+		setNotice({
+			tone: "info",
+			message: "Stored identity loaded. Enter its password to unlock chat.",
+		});
+	}
+
 	return (
 		<main className="min-h-svh bg-background text-foreground">
 			<section className="mx-auto flex min-h-svh w-full max-w-7xl flex-col px-4 py-4 sm:px-6">
-				<header className="flex shrink-0 items-center justify-between gap-4 py-2">
+				<header className="relative flex shrink-0 items-center justify-between gap-4 py-2">
 					<a
 						className="flex min-w-0 items-center gap-3 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-foreground"
 						href="https://sapphirelabs.org"
@@ -772,6 +859,18 @@ function HomePage() {
               ENCRYPTED BY SAPPHIRE
             </p> */}
 					</a>
+					{sessionKey ? (
+						<IdentityPill
+							identityStored={
+								storedIdentityAddress === sessionKey.publicAddress
+							}
+							sessionKey={sessionKey}
+							onChangeIdentity={() => window.location.reload()}
+							onDownloadIdentity={handleDownloadIdentity}
+							onRemoveStoredIdentity={handleRemoveStoredIdentity}
+							onStoreIdentity={handleStoreIdentity}
+						/>
+					) : null}
 					<div className="flex items-center gap-3">
 						<button
 							className="text-button"
@@ -787,6 +886,7 @@ function HomePage() {
 							<BookOpen className="size-4" aria-hidden="true" />
 							Guide
 						</button>
+						<ModeSelect />
 						<button
 							className="button button-pill min-h-10 px-4"
 							type="button"
@@ -801,9 +901,8 @@ function HomePage() {
 					</div>
 				</header>
 
-				{showIntroPopup ? <IntroInfoPopup /> : null}
-
-				<div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
+				<div className="relative mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
+					{showIntroPopup ? <IntroInfoPopup /> : null}
 					<section className="min-h-0 flex-1 overflow-y-auto py-4">
 						<div className="grid gap-4">
 							<AnimatePresence initial={false}>
@@ -846,9 +945,24 @@ function HomePage() {
 						sessionKey={sessionKey}
 						onAddressBook={() => setAddressBookModalOpen(true)}
 						onAttachmentUpload={handleAttachmentUpload}
-						onCancelRecording={cancelRecording}
 						onClearChat={clearChat}
 						onGenerate={handleGenerateKey}
+						onGeneratedKeyDownload={() => {
+							if (!generatedKey) {
+								return;
+							}
+
+							downloadText(
+								generatedKey.privateKeyFileName,
+								stringifyJson(generatedKey.privateKeyFile),
+								"application/json",
+							);
+							activateSession(
+								generatedKey.privateKeyFile,
+								keyPassword,
+								generatedKey.privateKeyFileName,
+							);
+						}}
 						onInputChange={setInputValue}
 						onKeyPasswordChange={setKeyPassword}
 						onKeyPasswordConfirmChange={setKeyPasswordConfirm}
@@ -862,6 +976,8 @@ function HomePage() {
 						onRemoveAttachment={removeAttachment}
 						onSend={() => void handleSend()}
 						onToggleRecording={() => void toggleRecording()}
+						onUseStoredIdentity={handleUseStoredIdentity}
+						storedIdentityAddress={storedIdentityAddress}
 					/>
 				</div>
 
@@ -911,6 +1027,704 @@ function HomePage() {
 	);
 }
 
+function BlockchainPage() {
+	const chatEndRef = useRef<HTMLDivElement>(null);
+	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+	const mediaStreamRef = useRef<MediaStream | null>(null);
+	const audioChunksRef = useRef<BlobPart[]>([]);
+	const keepRecordingRef = useRef(false);
+	const attachmentsRef = useRef<AttachmentDraft[]>([]);
+	const [session, setSession] = useState<BlockchainSession | null>(null);
+	const [mode, setMode] = useState<"encrypt" | "decrypt">("encrypt");
+	const [messages, setMessages] = useState<ChatMessage[]>([]);
+	const [inputValue, setInputValue] = useState("");
+	const [notice, setNotice] = useState<Notice | null>(null);
+	const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+	const [recipientProfileText, setRecipientProfileText] = useState("");
+	const [recipientProfile, setRecipientProfile] =
+		useState<BlockchainPublicProfile | null>(null);
+	const [isConnecting, setIsConnecting] = useState(false);
+	const [isProcessing, setIsProcessing] = useState(false);
+	const [isRecording, setIsRecording] = useState(false);
+	const [recordingSeconds, setRecordingSeconds] = useState(0);
+	const totalAttachmentBytes = useMemo(
+		() => attachments.reduce((total, attachment) => total + attachment.size, 0),
+		[attachments],
+	);
+	const canSend =
+		Boolean(session) &&
+		!isProcessing &&
+		((mode === "encrypt" &&
+			Boolean(recipientProfile) &&
+			(inputValue.trim().length > 0 || attachments.length > 0)) ||
+			(mode === "decrypt" && inputValue.trim().length > 0));
+
+	useEffect(() => {
+		chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+	}, [messages]);
+
+	useEffect(() => {
+		if (!isRecording) {
+			return;
+		}
+
+		const interval = window.setInterval(() => {
+			setRecordingSeconds((current) => current + 1);
+		}, 1000);
+
+		return () => window.clearInterval(interval);
+	}, [isRecording]);
+
+	useEffect(() => {
+		attachmentsRef.current = attachments;
+	}, [attachments]);
+
+	useEffect(() => {
+		return () => {
+			attachmentsRef.current.forEach((attachment) => {
+				if (attachment.objectUrl) {
+					URL.revokeObjectURL(attachment.objectUrl);
+				}
+			});
+			mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+		};
+	}, []);
+
+	function pushMessage(message: Omit<ChatMessage, "id">) {
+		setMessages((current) => [
+			...current,
+			{ ...message, id: crypto.randomUUID() } as ChatMessage,
+		]);
+	}
+
+	function replaceTyping(message: Omit<ChatMessage, "id">) {
+		setMessages((current) => [
+			...current.filter((item) => item.type !== "typing"),
+			{ ...message, id: crypto.randomUUID() } as ChatMessage,
+		]);
+	}
+
+	async function handleConnectWallet() {
+		setNotice(null);
+		setIsConnecting(true);
+
+		try {
+			const walletSession = await connectWallet();
+			setSession(walletSession);
+			pushMessage({
+				role: "system",
+				type: "notice",
+				notice: {
+					tone: "success",
+					message: "MetaMask connected. Blockchain mode is unlocked without a transaction.",
+				},
+			});
+		} catch (error) {
+			setNotice(toNotice(error, "Could not connect MetaMask."));
+		} finally {
+			setIsConnecting(false);
+		}
+	}
+
+	function handleLogoutWallet() {
+		attachments.forEach((attachment) => {
+			if (attachment.objectUrl) {
+				URL.revokeObjectURL(attachment.objectUrl);
+			}
+		});
+		keepRecordingRef.current = false;
+		mediaRecorderRef.current?.stop();
+		mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+		setSession(null);
+		setMessages([]);
+		setInputValue("");
+		setAttachments([]);
+		setRecipientProfile(null);
+		setRecipientProfileText("");
+		setNotice({
+			tone: "info",
+			message: "Wallet disconnected from this browser session.",
+		});
+	}
+
+	function handleRecipientProfileChange(value: string) {
+		setRecipientProfileText(value);
+
+		try {
+			if (!value.trim()) {
+				setRecipientProfile(null);
+				return;
+			}
+
+			const profile = parseBlockchainProfile(value);
+			setRecipientProfile(profile);
+			setNotice(null);
+		} catch {
+			setRecipientProfile(null);
+		}
+	}
+
+	async function handleAttachmentUpload(file: File) {
+		setNotice(null);
+
+		try {
+			if (totalAttachmentBytes + file.size > maxAttachmentBytes) {
+				throw new Error(
+					`Attachments can be up to ${formatFileSize(maxAttachmentBytes)} total.`,
+				);
+			}
+
+			const attachment = await fileToBase64Payload(file);
+			const isAudio = attachment.type.startsWith("audio/");
+			setAttachments((current) => [
+				...current,
+				isAudio ? { ...attachment, objectUrl: URL.createObjectURL(file) } : attachment,
+			]);
+		} catch (error) {
+			setNotice(toNotice(error, "Could not attach this file."));
+		}
+	}
+
+	function removeAttachment(id: string) {
+		setAttachments((current) => {
+			const removed = current.find((attachment) => attachment.id === id);
+			if (removed?.objectUrl) {
+				URL.revokeObjectURL(removed.objectUrl);
+			}
+
+			return current.filter((attachment) => attachment.id !== id);
+		});
+	}
+
+	function getPayload(): EncryptedPlaintextPayload {
+		const text = inputValue.trim() ? inputValue : undefined;
+		const hasText = Boolean(text);
+		const hasAttachments = attachments.length > 0;
+		const hasVoice = attachments.some((attachment) =>
+			attachment.type.startsWith("audio/"),
+		);
+
+		return {
+			version: "sapphire-payload-v1",
+			kind:
+				hasText && hasAttachments
+					? "mixed"
+					: hasVoice
+					? "voice"
+					: hasAttachments
+					? "files"
+					: "text",
+			text,
+			attachments: attachments.map(stripAttachmentDraft),
+		};
+	}
+
+	async function toggleRecording() {
+		if (isRecording) {
+			keepRecordingRef.current = true;
+			mediaRecorderRef.current?.stop();
+			return;
+		}
+
+		setNotice(null);
+
+		try {
+			if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+				throw new Error("Voice recording is not supported in this browser.");
+			}
+
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			const recorder = new MediaRecorder(stream);
+			audioChunksRef.current = [];
+			keepRecordingRef.current = true;
+			mediaStreamRef.current = stream;
+			mediaRecorderRef.current = recorder;
+
+			recorder.ondataavailable = (event) => {
+				if (event.data.size > 0) {
+					audioChunksRef.current.push(event.data);
+				}
+			};
+
+			recorder.onstop = () => {
+				const chunks = audioChunksRef.current;
+				const shouldAttach = keepRecordingRef.current;
+				stream.getTracks().forEach((track) => track.stop());
+				setIsRecording(false);
+				setRecordingSeconds(0);
+
+				if (!shouldAttach || chunks.length === 0) {
+					return;
+				}
+
+				const blob = new Blob(chunks, {
+					type: recorder.mimeType || "audio/webm",
+				});
+				const file = new File([blob], "voice-message.webm", {
+					type: blob.type || "audio/webm",
+				});
+				void handleAttachmentUpload(file);
+			};
+
+			recorder.start();
+			setRecordingSeconds(0);
+			setIsRecording(true);
+		} catch (error) {
+			setNotice(toNotice(error, "Could not start voice recording."));
+		}
+	}
+
+	async function decryptPackage(packageJson: string, userLabel: string) {
+		if (!session) {
+			return;
+		}
+
+		setNotice(null);
+		setIsProcessing(true);
+		pushMessage({ role: "user", type: "text", text: userLabel });
+		pushMessage({ role: "assistant", type: "typing" });
+
+		try {
+			const inspection = await inspectBlockchainPackage(packageJson);
+			if (!inspection.hashValid) {
+				throw new Error("This blockchain package failed integrity checks.");
+			}
+			const result = await decryptBlockchainPayload(packageJson, session);
+			setInputValue("");
+			replaceTyping({ role: "assistant", type: "decrypted", result });
+		} catch (error) {
+			replaceTyping({
+				role: "system",
+				type: "notice",
+				notice: toNotice(error, "The action failed."),
+			});
+		} finally {
+			setIsProcessing(false);
+		}
+	}
+
+	async function handlePackageUpload(file: File) {
+		setNotice(null);
+
+		try {
+			const text = await readTextFile(file);
+			if (session && mode === "decrypt") {
+				await decryptPackage(text, `Decrypt package: ${file.name}`);
+				return;
+			}
+			setInputValue(text);
+		} catch (error) {
+			setNotice(toNotice(error, "Could not read the encrypted package."));
+		}
+	}
+
+	async function handleSend() {
+		if (!session || !canSend) {
+			return;
+		}
+
+		if (mode === "decrypt") {
+			await decryptPackage(inputValue, "Decrypt pasted package");
+			return;
+		}
+
+		setNotice(null);
+		setIsProcessing(true);
+		pushMessage({
+			role: "user",
+			type: "text",
+			text:
+				attachments.length > 0
+					? [
+							inputValue || "Encrypt attached file",
+							...attachments.map(
+								(attachment) =>
+									`${attachment.name} (${formatFileSize(attachment.size)})`,
+							),
+					  ].join("\n")
+					: inputValue,
+		});
+		pushMessage({ role: "assistant", type: "typing" });
+
+		try {
+			if (!recipientProfile) {
+				throw new Error("Paste the recipient wallet encryption profile first.");
+			}
+
+			const result = await encryptBlockchainPayload({
+				payload: getPayload(),
+				recipientProfile,
+				session,
+			});
+			replaceTyping({
+				role: "assistant",
+				type: "encrypted",
+				result,
+				recipientAddress: recipientProfile.walletAddress,
+				recipientFingerprint: shortenAddress(recipientProfile.walletAddress),
+				senderAddress: session.address,
+				senderFingerprint: session.shortAddress,
+			});
+			setInputValue("");
+			setAttachments([]);
+		} catch (error) {
+			replaceTyping({
+				role: "system",
+				type: "notice",
+				notice: toNotice(error, "The action failed."),
+			});
+		} finally {
+			setIsProcessing(false);
+		}
+	}
+
+	return (
+		<main className="min-h-svh bg-background text-foreground">
+			<section className="mx-auto flex min-h-svh w-full max-w-7xl flex-col px-4 py-4 sm:px-6">
+				<header className="relative flex shrink-0 items-center justify-between gap-4 py-2">
+					<a
+						className="flex min-w-0 items-center gap-3 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-foreground"
+						href="https://sapphirelabs.org"
+						rel="noreferrer"
+						target="_blank"
+					>
+						<img
+							src={sapphireLogo}
+							className="size-10 rounded-md object-contain"
+							alt="SapphireLabs logo"
+						/>
+					</a>
+					<div className="flex items-center gap-3">
+						<ModeSelect />
+						{session ? (
+							<BlockchainWalletPill
+								session={session}
+								onLogout={handleLogoutWallet}
+							/>
+						) : null}
+					</div>
+				</header>
+
+				<div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col">
+					<section className="min-h-0 flex-1 overflow-y-auto py-4">
+						<div className="grid gap-4">
+							{!session && messages.length === 0 ? (
+								<div className="mx-auto mt-24 max-w-xl text-center">
+									<p className="text-xs font-bold uppercase tracking-wide">
+										Blockchain mode
+									</p>
+									<h1 className="mt-2 text-xl font-semibold">
+										Encrypt with your connected wallet
+									</h1>
+									<p className="mt-2 text-sm leading-6 text-muted-foreground">
+										Connect MetaMask, copy your public profile, and encrypt
+										messages to another user's wallet profile. No transaction is
+										sent.
+									</p>
+								</div>
+							) : null}
+							<AnimatePresence initial={false}>
+								{messages.map((message) => (
+									<ChatMessageView
+										key={message.id}
+										message={message}
+										onCopyNotice={setNotice}
+									/>
+								))}
+							</AnimatePresence>
+							<div ref={chatEndRef} />
+						</div>
+					</section>
+
+					<BlockchainComposer
+						attachments={attachments}
+						canSend={canSend}
+						inputValue={inputValue}
+						isConnecting={isConnecting}
+						isProcessing={isProcessing}
+						isRecording={isRecording}
+						mode={mode}
+						notice={notice}
+						recordingSeconds={recordingSeconds}
+						recipientProfile={recipientProfile}
+						recipientProfileText={recipientProfileText}
+						session={session}
+						onAttachmentUpload={handleAttachmentUpload}
+						onConnectWallet={() => void handleConnectWallet()}
+						onInputChange={setInputValue}
+						onModeChange={setMode}
+						onPackageUpload={handlePackageUpload}
+						onRecipientProfileChange={handleRecipientProfileChange}
+						onRemoveAttachment={removeAttachment}
+						onSend={() => void handleSend()}
+						onToggleRecording={() => void toggleRecording()}
+					/>
+				</div>
+
+				<footer className="mx-auto w-full max-w-5xl shrink-0 py-4 text-center text-xs leading-5 text-muted-foreground">
+					Blockchain mode uses a MetaMask signature to unlock a wallet-bound
+					encryption identity. Share your public profile with senders; only the
+					matching connected wallet can decrypt packages addressed to it.
+				</footer>
+			</section>
+		</main>
+	);
+}
+
+function BlockchainComposer({
+	attachments,
+	canSend,
+	inputValue,
+	isConnecting,
+	isProcessing,
+	isRecording,
+	mode,
+	notice,
+	onAttachmentUpload,
+	onConnectWallet,
+	onInputChange,
+	onModeChange,
+	onPackageUpload,
+	onRecipientProfileChange,
+	onRemoveAttachment,
+	onSend,
+	onToggleRecording,
+	recordingSeconds,
+	recipientProfile,
+	recipientProfileText,
+	session,
+}: {
+	attachments: AttachmentDraft[];
+	canSend: boolean;
+	inputValue: string;
+	isConnecting: boolean;
+	isProcessing: boolean;
+	isRecording: boolean;
+	mode: "encrypt" | "decrypt";
+	notice: Notice | null;
+	onAttachmentUpload: (file: File) => Promise<void>;
+	onConnectWallet: () => void;
+	onInputChange: (value: string) => void;
+	onModeChange: (mode: "encrypt" | "decrypt") => void;
+	onPackageUpload: (file: File) => Promise<void>;
+	onRecipientProfileChange: (value: string) => void;
+	onRemoveAttachment: (id: string) => void;
+	onSend: () => void;
+	onToggleRecording: () => void;
+	recordingSeconds: number;
+	recipientProfile: BlockchainPublicProfile | null;
+	recipientProfileText: string;
+	session: BlockchainSession | null;
+}) {
+	const packageInputRef = useRef<HTMLInputElement>(null);
+	const attachmentInputRef = useRef<HTMLInputElement>(null);
+	const composerHeight = session
+		? mode === "encrypt" && !recipientProfile
+			? 206
+			: attachments.length > 0 || isRecording
+			? 130
+			: 68
+		: 142;
+
+	return (
+		<div className="shrink-0 pb-3">
+			<motion.div
+				className="w-full border border-border bg-white"
+				animate={{
+					height: composerHeight,
+					boxShadow: session
+						? "0 2px 8px rgba(0,0,0,0.08)"
+						: "0 12px 38px rgba(0,0,0,0.13)",
+				}}
+				initial={false}
+				transition={{ type: "spring", stiffness: 120, damping: 18 }}
+				style={{ overflow: "hidden", borderRadius: 32 }}
+			>
+				<div className="flex h-full flex-col">
+					<div className="flex w-full items-center gap-2 p-3">
+						<button
+							className="rounded-full p-3 transition hover:bg-muted disabled:opacity-40"
+							title={mode === "decrypt" ? "Attach encrypted JSON" : "Attach file"}
+							type="button"
+							disabled={!session}
+							onClick={() => {
+								if (mode === "decrypt") {
+									packageInputRef.current?.click();
+								} else {
+									attachmentInputRef.current?.click();
+								}
+							}}
+						>
+							<Paperclip className="size-5" />
+						</button>
+						<input
+							ref={packageInputRef}
+							className="sr-only"
+							type="file"
+							accept="application/json,.json"
+							onChange={(event) => {
+								const file = event.currentTarget.files?.[0];
+								if (file) {
+									void onPackageUpload(file);
+								}
+								event.currentTarget.value = "";
+							}}
+						/>
+						<input
+							ref={attachmentInputRef}
+							className="sr-only"
+							type="file"
+							multiple
+							onChange={(event) => {
+								Array.from(event.currentTarget.files ?? []).forEach((file) => {
+									void onAttachmentUpload(file);
+								});
+								event.currentTarget.value = "";
+							}}
+						/>
+
+						{session ? (
+							<div className="hidden shrink-0 items-center gap-1 sm:flex">
+								<button
+									className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+										mode === "encrypt"
+											? "bg-black text-white"
+											: "bg-muted text-muted-foreground hover:text-foreground"
+									}`}
+									type="button"
+									onClick={() => onModeChange("encrypt")}
+								>
+									Encrypt
+								</button>
+								<button
+									className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+										mode === "decrypt"
+											? "bg-black text-white"
+											: "bg-muted text-muted-foreground hover:text-foreground"
+									}`}
+									type="button"
+									onClick={() => onModeChange("decrypt")}
+								>
+									Decrypt
+								</button>
+							</div>
+						) : null}
+
+						{session && mode === "encrypt" && recipientProfile ? (
+							<button
+								className="hidden max-w-44 items-center gap-2 rounded-full bg-muted px-3 py-1 text-xs font-semibold transition hover:bg-gray-200 sm:inline-flex"
+								type="button"
+								title="Change recipient"
+								onClick={() => onRecipientProfileChange("")}
+							>
+								<span className="text-muted-foreground">To</span>
+								<span className="truncate font-mono">
+									{shortenAddress(recipientProfile.walletAddress)}
+								</span>
+								<X className="size-3" />
+							</button>
+						) : null}
+
+						<div className="relative min-w-0 flex-1">
+							<input
+								className="relative z-10 w-full border-0 bg-transparent py-2 text-base outline-0 disabled:cursor-not-allowed disabled:text-muted-foreground"
+								disabled={!session}
+								type="text"
+								value={inputValue}
+								placeholder={
+									session
+										? mode === "decrypt"
+											? "Paste blockchain encrypted JSON"
+											: recipientProfile
+											? "Message to encrypt for recipient"
+											: "Paste recipient wallet profile first"
+										: "Connect MetaMask to unlock blockchain mode"
+								}
+								onChange={(event) => onInputChange(event.target.value)}
+								onKeyDown={(event) => {
+									if (event.key === "Enter") {
+										onSend();
+									}
+								}}
+							/>
+						</div>
+
+						{session ? (
+							<>
+								<button
+									className="inline-flex size-11 items-center justify-center rounded-full bg-black text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40"
+									title="Send"
+									type="button"
+									disabled={!canSend}
+									onClick={onSend}
+								>
+									{isProcessing ? (
+										<TypingDots compact />
+									) : (
+										<Send className="size-5" />
+									)}
+								</button>
+								{mode === "encrypt" ? (
+									<VoiceRecorderButton
+										isRecording={isRecording}
+										recordingSeconds={recordingSeconds}
+										onToggle={onToggleRecording}
+									/>
+								) : null}
+							</>
+						) : (
+							<button
+								className="button button-download min-w-36"
+								type="button"
+								disabled={isConnecting}
+								onClick={onConnectWallet}
+							>
+								{isConnecting ? "Connecting..." : "Connect wallet"}
+							</button>
+						)}
+					</div>
+
+					{session && mode === "encrypt" && attachments.length > 0 ? (
+						<div className="border-t border-border px-4 pb-3">
+							<AttachmentStrip
+								attachments={attachments}
+								onRemoveAttachment={onRemoveAttachment}
+							/>
+						</div>
+					) : null}
+
+					{session && mode === "encrypt" && !recipientProfile ? (
+						<div className="border-t border-border px-4 pb-3 pt-3">
+							<label
+								className="grid gap-2 text-sm font-semibold"
+								htmlFor="blockchain-recipient-profile"
+							>
+								Recipient wallet profile
+								<textarea
+									id="blockchain-recipient-profile"
+									className="min-h-24 w-full resize-none rounded-[1.35rem] border border-border bg-white px-4 py-3 font-mono text-xs font-medium outline-none transition focus:border-black"
+									value={recipientProfileText}
+									placeholder="Paste the recipient's public encryption profile JSON"
+									onChange={(event) =>
+										onRecipientProfileChange(event.target.value)
+									}
+								/>
+							</label>
+						</div>
+					) : null}
+
+					{!session ? (
+						<div className="px-4 pb-3">
+							<NoticeBox notice={notice} />
+						</div>
+					) : null}
+				</div>
+			</motion.div>
+			{session ? <div className="mt-2"><NoticeBox notice={notice} /></div> : null}
+		</div>
+	);
+}
+
 function ChatComposer({
 	attachments,
 	canSend,
@@ -930,9 +1744,9 @@ function ChatComposer({
 	notice,
 	onAddressBook,
 	onAttachmentUpload,
-	onCancelRecording,
 	onClearChat,
 	onGenerate,
+	onGeneratedKeyDownload,
 	onInputChange,
 	onKeyPasswordChange,
 	onKeyPasswordConfirmChange,
@@ -946,6 +1760,7 @@ function ChatComposer({
 	onRemoveAttachment,
 	onSend,
 	onToggleRecording,
+	onUseStoredIdentity,
 	packageFileName,
 	packageInspection,
 	packageText,
@@ -954,6 +1769,7 @@ function ChatComposer({
 	recipientAddress,
 	recipientFingerprint,
 	sessionKey,
+	storedIdentityAddress,
 }: {
 	attachments: AttachmentDraft[];
 	canSend: boolean;
@@ -973,9 +1789,9 @@ function ChatComposer({
 	notice: Notice | null;
 	onAddressBook: () => void;
 	onAttachmentUpload: (file: File) => Promise<void>;
-	onCancelRecording: () => void;
 	onClearChat: () => void;
 	onGenerate: () => void;
+	onGeneratedKeyDownload: () => void;
 	onInputChange: (value: string) => void;
 	onKeyPasswordChange: (value: string) => void;
 	onKeyPasswordConfirmChange: (value: string) => void;
@@ -989,6 +1805,7 @@ function ChatComposer({
 	onRemoveAttachment: (id: string) => void;
 	onSend: () => void;
 	onToggleRecording: () => void;
+	onUseStoredIdentity: () => void;
 	packageFileName: string;
 	packageInspection: PackageInspection | null;
 	packageText: string;
@@ -997,6 +1814,7 @@ function ChatComposer({
 	recipientAddress: string;
 	recipientFingerprint: string;
 	sessionKey: SessionKeyState | null;
+	storedIdentityAddress: string;
 }) {
 	const [placeholderIndex, setPlaceholderIndex] = useState(0);
 	const [showPlaceholder, setShowPlaceholder] = useState(true);
@@ -1033,6 +1851,8 @@ function ChatComposer({
 			? loadKeyFile
 				? 360
 				: 268
+			: storedIdentityAddress
+			? 174
 			: 122
 		: composerReady
 		? mode === "encrypt" && (attachments.length > 0 || isRecording)
@@ -1261,9 +2081,6 @@ function ChatComposer({
 						<div className="border-t border-border px-4 pb-3">
 							<AttachmentStrip
 								attachments={attachments}
-								isRecording={isRecording}
-								recordingSeconds={recordingSeconds}
-								onCancelRecording={onCancelRecording}
 								onRemoveAttachment={onRemoveAttachment}
 							/>
 						</div>
@@ -1285,17 +2102,19 @@ function ChatComposer({
 									notice={notice}
 									passwordStrength={passwordStrength}
 									onGenerate={onGenerate}
+									onGeneratedKeyDownload={onGeneratedKeyDownload}
 									onKeyPasswordChange={onKeyPasswordChange}
 									onKeyPasswordConfirmChange={onKeyPasswordConfirmChange}
 									onLoadKeyConfirm={onLoadKeyConfirm}
 									onLoadKeyPasswordChange={onLoadKeyPasswordChange}
 									onModeChange={onModeChange}
 									onPrivateKeyUpload={onPrivateKeyUpload}
+									onUseStoredIdentity={onUseStoredIdentity}
+									storedIdentityAddress={storedIdentityAddress}
 								/>
 							) : (
 								<UnlockedComposerPanel
 									attachments={attachments}
-									isRecording={isRecording}
 									mode={mode}
 									notice={notice}
 									onAddressBook={onAddressBook}
@@ -1309,8 +2128,6 @@ function ChatComposer({
 									recipientAddress={recipientAddress}
 									recipientFingerprint={recipientFingerprint}
 									sessionKey={sessionKey}
-									recordingSeconds={recordingSeconds}
-									onCancelRecording={onCancelRecording}
 									onRemoveAttachment={onRemoveAttachment}
 								/>
 							)}
@@ -1324,36 +2141,435 @@ function ChatComposer({
 
 function IntroInfoPopup() {
 	return (
-		<motion.aside
-			className="pointer-events-none fixed left-1/2 top-[20%] z-10 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-[2rem] bg-[#fff2e3] px-6 py-5 text-center text-[#3b2415] shadow-[0_18px_60px_rgba(59,36,21,0.12)]"
-			initial={{ opacity: 0, y: 12 }}
-			animate={{ opacity: 1, y: 0 }}
-			transition={{ duration: 0.24 }}
+		<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-4 text-center">
+			<motion.aside
+				className="w-full max-w-xl px-6 py-5 text-black"
+				initial={{ opacity: 0, y: 12 }}
+				animate={{ opacity: 1, y: 0 }}
+				transition={{ duration: 0.24 }}
+			>
+				<p className="text-xs font-bold uppercase tracking-wide text-black">
+					Encrypted by Sapphire Labs.
+				</p>
+				<h1 className="mt-2 text-xl font-semibold">
+					Private encryption in your browser
+				</h1>
+				<p className="mt-2 text-sm leading-6 text-black/70">
+					Create or upload your private key to unlock a local chat workspace for
+					encrypting messages, files, and voice notes. Private keys stay in this
+					browser session only, and encrypted packages can be copied or downloaded
+					for secure sharing.
+				</p>
+				<p className="mt-3 text-sm font-semibold">
+					developed by{" "}
+					<a
+						className="pointer-events-auto underline decoration-black/30 underline-offset-4 transition hover:text-black/70"
+						href="https://sapphirelabs.org"
+						rel="noreferrer"
+						target="_blank"
+					>
+						sapphirelabs.org
+					</a>
+				</p>
+			</motion.aside>
+		</div>
+	);
+}
+
+function ModeSelect() {
+	const location = useLocation();
+	const navigate = useNavigate();
+	const [open, setOpen] = useState(false);
+	const wrapperRef = useRef<HTMLDivElement>(null);
+	const currentMode = location.pathname.startsWith("/blockchain")
+		? "Blockchain"
+		: "Local";
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+
+		function handlePointerDown(event: MouseEvent) {
+			if (!wrapperRef.current?.contains(event.target as Node)) {
+				setOpen(false);
+			}
+		}
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => document.removeEventListener("mousedown", handlePointerDown);
+	}, [open]);
+
+	function selectMode(path: "/blockchain" | "/local") {
+		navigate(path);
+		setOpen(false);
+	}
+
+	return (
+		<div
+			className="relative z-40"
+			ref={wrapperRef}
 		>
-			<p className="text-xs font-bold uppercase tracking-wide text-[#8a4d22]">
-				Encrypted by Sapphire Labs.
-			</p>
-			<h1 className="mt-2 text-xl font-semibold">
-				Private encryption in your browser
-			</h1>
-			<p className="mt-2 text-sm leading-6 text-[#6f4a31]">
-				Create or upload your private key to unlock a local chat workspace for
-				encrypting messages, files, and voice notes. Private keys stay in this
-				browser session only, and encrypted packages can be copied or downloaded
-				for secure sharing.
-			</p>
-			<p className="mt-3 text-sm font-semibold">
-				developed by{" "}
-				<a
-					className="pointer-events-auto underline decoration-[#8a4d22]/40 underline-offset-4 transition hover:text-black"
-					href="https://sapphirelabs.org"
-					rel="noreferrer"
-					target="_blank"
+			<button
+				className="inline-flex items-center gap-2 rounded-full bg-muted px-4 py-2 text-sm font-bold transition hover:bg-gray-200"
+				type="button"
+				onClick={() => setOpen((current) => !current)}
+			>
+				{currentMode}
+				<ChevronDown
+					className={`size-4 transition ${open ? "rotate-180" : ""}`}
+				/>
+			</button>
+			<AnimatePresence>
+				{open ? (
+					<motion.div
+						className="absolute right-0 top-full mt-2 w-44 rounded-3xl bg-white p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.14)]"
+						initial={{ opacity: 0, y: -6, scale: 0.98 }}
+						animate={{ opacity: 1, y: 0, scale: 1 }}
+						exit={{ opacity: 0, y: -6, scale: 0.98 }}
+						transition={{ duration: 0.16 }}
+					>
+						<button
+							className="identity-menu-item"
+							type="button"
+							onClick={() => selectMode("/local")}
+						>
+							Local
+						</button>
+						<button
+							className="identity-menu-item"
+							type="button"
+							onClick={() => selectMode("/blockchain")}
+						>
+							Blockchain
+						</button>
+					</motion.div>
+				) : null}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+function IdentityPill({
+	identityStored,
+	onChangeIdentity,
+	onDownloadIdentity,
+	onRemoveStoredIdentity,
+	onStoreIdentity,
+	sessionKey,
+}: {
+	identityStored: boolean;
+	onChangeIdentity: () => void;
+	onDownloadIdentity: () => void;
+	onRemoveStoredIdentity: () => void;
+	onStoreIdentity: () => void;
+	sessionKey: SessionKeyState;
+}) {
+	const [open, setOpen] = useState(false);
+	const [copied, setCopied] = useState(false);
+	const menuRef = useRef<HTMLDivElement>(null);
+	const copyTimeoutRef = useRef<number | null>(null);
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+
+		function handlePointerDown(event: MouseEvent) {
+			if (!menuRef.current?.contains(event.target as Node)) {
+				setOpen(false);
+			}
+		}
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => document.removeEventListener("mousedown", handlePointerDown);
+	}, [open]);
+
+	useEffect(() => {
+		return () => {
+			if (copyTimeoutRef.current) {
+				window.clearTimeout(copyTimeoutRef.current);
+			}
+		};
+	}, []);
+
+	function handleAction(action: () => void) {
+		action();
+		setOpen(false);
+	}
+
+	async function handleCopyAddress() {
+		if (copyTimeoutRef.current) {
+			window.clearTimeout(copyTimeoutRef.current);
+		}
+
+		await navigator.clipboard.writeText(sessionKey.publicAddress);
+		setCopied(true);
+		copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 1800);
+	}
+
+	return (
+		<div
+			className="absolute left-1/2 top-1/2 z-30 hidden w-[min(26rem,calc(100%-18rem))] -translate-x-1/2 -translate-y-1/2 justify-center md:flex"
+			ref={menuRef}
+		>
+			<div
+				className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted px-2 py-1.5 text-sm font-bold text-foreground transition hover:bg-gray-200"
+				title={sessionKey.publicAddress}
+			>
+				<span className="size-2.5 shrink-0 rounded-full bg-emerald-500" />
+				<button
+					className="shrink-0 rounded-full px-2 py-1 transition hover:bg-white/75"
+					type="button"
+					onClick={() => setOpen((current) => !current)}
 				>
-					sapphirelabs.org
-				</a>
-			</p>
-		</motion.aside>
+					IDENTITY
+				</button>
+				<span className="min-w-0 truncate rounded-full px-2 py-1 font-mono text-xs text-muted-foreground">
+					{sessionKey.fingerprint}
+				</span>
+				<button
+					className="inline-flex size-7 shrink-0 items-center justify-center rounded-full transition hover:bg-white/75"
+					type="button"
+					aria-label="Open identity menu"
+					onClick={() => setOpen((current) => !current)}
+				>
+					<ChevronDown
+						className={`size-4 shrink-0 transition ${open ? "rotate-180" : ""}`}
+					/>
+				</button>
+			</div>
+
+			<AnimatePresence>
+				{open ? (
+					<motion.div
+						className="absolute top-full mt-2 w-72 overflow-hidden rounded-3xl bg-white p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.14)]"
+						initial={{ opacity: 0, y: -6, scale: 0.98 }}
+						animate={{ opacity: 1, y: 0, scale: 1 }}
+						exit={{ opacity: 0, y: -6, scale: 0.98 }}
+						transition={{ duration: 0.16 }}
+					>
+						<div className="px-3 py-2">
+							<p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+								Connected wallet
+							</p>
+							<button
+								className="mt-1 inline-flex w-full items-center justify-between gap-2 rounded-full bg-muted px-3 py-2 font-mono text-xs text-foreground transition hover:bg-gray-200"
+								type="button"
+								title="Copy public address"
+								onClick={() => void handleCopyAddress()}
+							>
+								<span>{shortenAddress(sessionKey.publicAddress)}</span>
+								<span className="relative inline-flex size-4 items-center justify-center">
+									<Copy
+										className={`absolute size-4 transition ${
+											copied
+												? "scale-75 opacity-0"
+												: "scale-100 opacity-100"
+										}`}
+									/>
+									<Check
+										className={`absolute size-4 transition ${
+											copied
+												? "scale-100 opacity-100"
+												: "scale-75 opacity-0"
+										}`}
+									/>
+								</span>
+							</button>
+						</div>
+						<button
+							className="identity-menu-item"
+							type="button"
+							onClick={() => handleAction(onDownloadIdentity)}
+						>
+							<Download className="size-4" />
+							Download JSON
+						</button>
+						<button
+							className="identity-menu-item"
+							type="button"
+							onClick={() => handleAction(onStoreIdentity)}
+						>
+							<HardDrive className="size-4" />
+							{identityStored ? "Stored locally" : "Store locally"}
+						</button>
+						{identityStored ? (
+							<button
+								className="identity-menu-item text-red-700 hover:bg-red-50"
+								type="button"
+								onClick={() => handleAction(onRemoveStoredIdentity)}
+							>
+								<Trash2 className="size-4" />
+								Remove stored identity
+							</button>
+						) : null}
+						<button
+							className="identity-menu-item text-red-700 hover:bg-red-50"
+							type="button"
+							onClick={() => handleAction(onChangeIdentity)}
+						>
+							<RefreshCw className="size-4" />
+							Change identity
+						</button>
+					</motion.div>
+				) : null}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+function BlockchainWalletPill({
+	onLogout,
+	session,
+}: {
+	onLogout: () => void;
+	session: BlockchainSession;
+}) {
+	const [open, setOpen] = useState(false);
+	const [copied, setCopied] = useState(false);
+	const [profileCopied, setProfileCopied] = useState(false);
+	const menuRef = useRef<HTMLDivElement>(null);
+	const copyTimeoutRef = useRef<number | null>(null);
+	const profileCopyTimeoutRef = useRef<number | null>(null);
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+
+		function handlePointerDown(event: MouseEvent) {
+			if (!menuRef.current?.contains(event.target as Node)) {
+				setOpen(false);
+			}
+		}
+
+		document.addEventListener("mousedown", handlePointerDown);
+		return () => document.removeEventListener("mousedown", handlePointerDown);
+	}, [open]);
+
+	useEffect(() => {
+		return () => {
+			if (copyTimeoutRef.current) {
+				window.clearTimeout(copyTimeoutRef.current);
+			}
+			if (profileCopyTimeoutRef.current) {
+				window.clearTimeout(profileCopyTimeoutRef.current);
+			}
+		};
+	}, []);
+
+	async function handleCopyAddress() {
+		if (copyTimeoutRef.current) {
+			window.clearTimeout(copyTimeoutRef.current);
+		}
+
+		await navigator.clipboard.writeText(session.address);
+		setCopied(true);
+		copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 1800);
+	}
+
+	async function handleCopyProfile() {
+		if (profileCopyTimeoutRef.current) {
+			window.clearTimeout(profileCopyTimeoutRef.current);
+		}
+
+		await navigator.clipboard.writeText(stringifyJson(session.publicProfile));
+		setProfileCopied(true);
+		profileCopyTimeoutRef.current = window.setTimeout(
+			() => setProfileCopied(false),
+			1800,
+		);
+	}
+
+	function handleLogout() {
+		onLogout();
+		setOpen(false);
+	}
+
+	return (
+		<div className="relative z-30 hidden md:block" ref={menuRef}>
+			<button
+				className="inline-flex items-center gap-2 rounded-full bg-muted px-4 py-2 text-sm font-bold transition hover:bg-gray-200"
+				type="button"
+				title={session.address}
+				onClick={() => setOpen((current) => !current)}
+			>
+				<span className="size-2.5 shrink-0 rounded-full bg-emerald-500" />
+				<span className="font-mono text-xs">{session.shortAddress}</span>
+				<span className="hidden text-xs text-muted-foreground lg:inline">
+					{session.networkName}
+				</span>
+				<ChevronDown
+					className={`size-4 shrink-0 transition ${open ? "rotate-180" : ""}`}
+				/>
+			</button>
+
+			<AnimatePresence>
+				{open ? (
+					<motion.div
+						className="absolute right-0 top-full mt-2 w-72 overflow-hidden rounded-3xl bg-white p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.14)]"
+						initial={{ opacity: 0, y: -6, scale: 0.98 }}
+						animate={{ opacity: 1, y: 0, scale: 1 }}
+						exit={{ opacity: 0, y: -6, scale: 0.98 }}
+						transition={{ duration: 0.16 }}
+					>
+						<div className="px-3 py-2">
+							<p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+								Connected wallet
+							</p>
+							<button
+								className="mt-1 inline-flex w-full items-center justify-between gap-2 rounded-full bg-muted px-3 py-2 font-mono text-xs text-foreground transition hover:bg-gray-200"
+								type="button"
+								title="Copy wallet address"
+								onClick={() => void handleCopyAddress()}
+							>
+								<span>{shortenAddress(session.address)}</span>
+								<span className="relative inline-flex size-4 items-center justify-center">
+									<Copy
+										className={`absolute size-4 transition ${
+											copied
+												? "scale-75 opacity-0"
+												: "scale-100 opacity-100"
+										}`}
+									/>
+									<Check
+										className={`absolute size-4 transition ${
+											copied
+												? "scale-100 opacity-100"
+												: "scale-75 opacity-0"
+										}`}
+									/>
+								</span>
+							</button>
+							<p className="mt-2 text-xs text-muted-foreground">
+								{session.networkName}
+							</p>
+						</div>
+						<button
+							className="identity-menu-item"
+							type="button"
+							onClick={() => void handleCopyProfile()}
+						>
+							{profileCopied ? (
+								<Check className="size-4" />
+							) : (
+								<Copy className="size-4" />
+							)}
+							Copy public profile
+						</button>
+						<button
+							className="identity-menu-item text-red-700 hover:bg-red-50"
+							type="button"
+							onClick={handleLogout}
+						>
+							<LogOut className="size-4" />
+							Logout
+						</button>
+					</motion.div>
+				) : null}
+			</AnimatePresence>
+		</div>
 	);
 }
 
@@ -1447,13 +2663,16 @@ function LockedComposerPanel({
 	mode,
 	notice,
 	onGenerate,
+	onGeneratedKeyDownload,
 	onKeyPasswordChange,
 	onKeyPasswordConfirmChange,
 	onLoadKeyConfirm,
 	onLoadKeyPasswordChange,
 	onModeChange,
 	onPrivateKeyUpload,
+	onUseStoredIdentity,
 	passwordStrength,
+	storedIdentityAddress,
 }: {
 	generatedKey: GeneratedKeyPair | null;
 	isGenerating: boolean;
@@ -1466,16 +2685,32 @@ function LockedComposerPanel({
 	mode: ChatMode;
 	notice: Notice | null;
 	onGenerate: () => void;
+	onGeneratedKeyDownload: () => void;
 	onKeyPasswordChange: (value: string) => void;
 	onKeyPasswordConfirmChange: (value: string) => void;
 	onLoadKeyConfirm: () => void;
 	onLoadKeyPasswordChange: (value: string) => void;
 	onModeChange: (mode: ChatMode) => void;
 	onPrivateKeyUpload: (file: File) => Promise<void>;
+	onUseStoredIdentity: () => void;
 	passwordStrength: PasswordStrength;
+	storedIdentityAddress: string;
 }) {
 	return (
 		<div className="grid gap-2">
+			{storedIdentityAddress ? (
+				<button
+					className="button button-pill"
+					type="button"
+					onClick={onUseStoredIdentity}
+				>
+					<span className="size-2.5 rounded-full bg-emerald-500" />
+					Use stored identity
+					<span className="font-mono text-xs text-muted-foreground">
+						{shortenAddress(storedIdentityAddress)}
+					</span>
+				</button>
+			) : null}
 			<div className="grid gap-2 sm:grid-cols-2">
 				<button
 					className={`button button-pill ${
@@ -1546,16 +2781,10 @@ function LockedComposerPanel({
 						<button
 							className="button button-download"
 							type="button"
-							onClick={() =>
-								downloadText(
-									generatedKey.privateKeyFileName,
-									stringifyJson(generatedKey.privateKeyFile),
-									"application/json",
-								)
-							}
+							onClick={onGeneratedKeyDownload}
 						>
 							<Download className="size-4" />
-							Download private key
+							Download private key and unlock chat
 						</button>
 					) : null}
 				</motion.div>
@@ -1605,55 +2834,55 @@ function LockedComposerPanel({
 
 function AttachmentStrip({
 	attachments,
-	isRecording,
-	onCancelRecording,
 	onRemoveAttachment,
-	recordingSeconds,
 }: {
 	attachments: AttachmentDraft[];
-	isRecording: boolean;
-	onCancelRecording: () => void;
 	onRemoveAttachment: (id: string) => void;
-	recordingSeconds: number;
 }) {
 	return (
 		<div className="flex flex-wrap items-center gap-2 pt-3">
-			{attachments.map((attachment) => (
-				<span
-					className="inline-flex max-w-full items-center gap-2 rounded-full bg-muted px-3 py-1 text-xs font-semibold"
-					key={attachment.id}
-				>
-					<FileText className="size-3 shrink-0" />
-					<span className="max-w-48 truncate">{attachment.name}</span>
-					<span className="text-muted-foreground">
-						{formatFileSize(attachment.size)}
-					</span>
-					<button
-						className="text-muted-foreground hover:text-foreground"
-						type="button"
-						title="Remove attachment"
-						onClick={() => onRemoveAttachment(attachment.id)}
+			{attachments.map((attachment) => {
+				const isAudio = attachment.type.startsWith("audio/");
+
+				return (
+					<span
+						className={`inline-flex max-w-full items-center gap-2 rounded-full bg-muted px-3 py-1 text-xs font-semibold ${
+							isAudio ? "min-h-11" : ""
+						}`}
+						key={attachment.id}
 					>
-						<X className="size-3" />
-					</button>
-				</span>
-			))}
-			{isRecording ? (
-				<span className="inline-flex items-center gap-2 rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">
-					<span className="size-2 rounded-full bg-red-600" />
-					Recording {formatDuration(recordingSeconds)}
-					<button type="button" onClick={onCancelRecording}>
-						Cancel
-					</button>
-				</span>
-			) : null}
+						<FileText className="size-3 shrink-0" />
+						<span className="max-w-48 truncate">{attachment.name}</span>
+						{isAudio && attachment.objectUrl ? (
+							<audio
+								className="h-8 max-w-56"
+								controls
+								src={attachment.objectUrl}
+							>
+								<track kind="captions" />
+							</audio>
+						) : (
+							<span className="text-muted-foreground">
+								{formatFileSize(attachment.size)}
+							</span>
+						)}
+						<button
+							className="text-muted-foreground hover:text-foreground"
+							type="button"
+							title="Remove attachment"
+							onClick={() => onRemoveAttachment(attachment.id)}
+						>
+							<X className="size-3" />
+						</button>
+					</span>
+				);
+			})}
 		</div>
 	);
 }
 
 function UnlockedComposerPanel({
 	attachments,
-	isRecording,
 	mode,
 	notice,
 	onAddressBook,
@@ -1666,13 +2895,10 @@ function UnlockedComposerPanel({
 	packageText,
 	recipientAddress,
 	recipientFingerprint,
-	recordingSeconds,
 	sessionKey,
-	onCancelRecording,
 	onRemoveAttachment,
 }: {
 	attachments: AttachmentDraft[];
-	isRecording: boolean;
 	mode: ChatMode;
 	notice: Notice | null;
 	onAddressBook: () => void;
@@ -1685,9 +2911,7 @@ function UnlockedComposerPanel({
 	packageText: string;
 	recipientAddress: string;
 	recipientFingerprint: string;
-	recordingSeconds: number;
 	sessionKey: SessionKeyState;
-	onCancelRecording: () => void;
 	onRemoveAttachment: (id: string) => void;
 }) {
 	return (
@@ -1736,12 +2960,9 @@ function UnlockedComposerPanel({
 							</span>
 						) : null}
 					</Field>
-					{attachments.length > 0 || isRecording ? (
+					{attachments.length > 0 ? (
 						<AttachmentStrip
 							attachments={attachments}
-							isRecording={isRecording}
-							recordingSeconds={recordingSeconds}
-							onCancelRecording={onCancelRecording}
 							onRemoveAttachment={onRemoveAttachment}
 						/>
 					) : null}
@@ -1826,11 +3047,11 @@ function ChatMessageView({
 		>
 			<div
 				className={`max-w-[min(100%,52rem)] rounded-[1.75rem] px-4 py-3 ${
-					isUser ? "bg-black text-white" : "bg-[#fff2e3] text-[#3b2415]"
+					isUser ? "bg-black text-white" : "bg-white text-black"
 				}`}
 			>
 				{message.type === "guide" ? (
-					<p className="whitespace-pre-wrap text-sm leading-6 text-[#3b2415]">
+					<p className="whitespace-pre-wrap text-sm leading-6 text-black">
 						{message.text ?? ""}
 					</p>
 				) : null}
@@ -1881,6 +3102,8 @@ function DecryptionResultCard({
 	onCopyNotice: (notice: Notice) => void;
 }) {
 	const text = message.result.payload.text ?? "";
+	const blockchainWallet =
+		"walletAddress" in message.result ? message.result.walletAddress : "";
 
 	return (
 		<div className="grid w-full max-w-[min(100%,52rem)] gap-3">
@@ -1892,9 +3115,11 @@ function DecryptionResultCard({
 			) : null}
 			<CopySnippet
 				text={[
-					`Sender: ${getPublicAddressFingerprint(
-						message.result.senderAddress,
-					)}`,
+					blockchainWallet
+						? `Wallet: ${shortenAddress(blockchainWallet)}`
+						: `Sender: ${getPublicAddressFingerprint(
+								message.result.senderAddress,
+						  )}`,
 					`Hash: ${message.result.messageHash}`,
 				]}
 				prompt={false}
@@ -1913,16 +3138,16 @@ function CodeSnippet({ text }: { text: string }) {
 	}
 
 	return (
-		<div className="relative overflow-hidden rounded-[1.75rem] bg-[#fff2e3] text-[#3b2415]">
+		<div className="relative overflow-hidden rounded-[1.75rem] bg-white text-black">
 			<button
-				className="absolute right-2 top-2 z-10 inline-flex size-9 items-center justify-center rounded-full bg-[#3b2415] text-[#fff2e3] transition hover:bg-black"
+				className="absolute right-2 top-2 z-10 inline-flex size-9 items-center justify-center rounded-full bg-black text-white transition hover:bg-zinc-700"
 				type="button"
 				title="Copy"
 				onClick={() => void handleCopy()}
 			>
 				{copied ? <Check className="size-4" /> : <Copy className="size-4" />}
 			</button>
-			<pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-4 pr-14 font-mono text-xs leading-5 text-[#3b2415]">
+			<pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-4 pr-14 font-mono text-xs leading-5 text-black">
 				<code>{text}</code>
 			</pre>
 		</div>
@@ -1944,7 +3169,7 @@ function DecryptedAttachmentList({
 
 				return (
 					<div
-						className="grid gap-2 rounded-[1.75rem] bg-[#fff2e3] p-3 text-[#3b2415]"
+						className="grid gap-2 rounded-[1.75rem] bg-white p-3 text-black"
 						key={attachment.id}
 					>
 						<div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -2117,11 +3342,11 @@ function CopySnippet({
 	}
 
 	return (
-		<div className="flex gap-3 rounded-[1.75rem] bg-[#fff2e3] px-3 py-2.5 text-[#3b2415]">
+		<div className="flex gap-3 rounded-[1.75rem] bg-white px-3 py-2.5 text-black">
 			<div className="min-w-0 flex-1">
 				{values.map((item) => (
 					<div
-						className="break-all font-mono text-[13px] leading-5 text-[#3b2415]"
+						className="break-all font-mono text-[13px] leading-5 text-black"
 						key={item}
 					>
 						{prompt ? "$ " : ""}
@@ -2965,6 +4190,14 @@ function formatDuration(seconds: number) {
 	return `${minutes}:${remainder}`;
 }
 
+function shortenAddress(address: string) {
+	if (address.length <= 11) {
+		return address;
+	}
+
+	return `${address.slice(0, 4)}...${address.slice(-4)}`;
+}
+
 function loadAddressBook(): AddressBookEntry[] {
 	try {
 		const storedValue = localStorage.getItem(addressBookStorageKey);
@@ -2984,6 +4217,38 @@ function loadAddressBook(): AddressBookEntry[] {
 			.filter((entry): entry is AddressBookEntry => entry !== null);
 	} catch {
 		return [];
+	}
+}
+
+function loadStoredIdentityAddress() {
+	try {
+		const stored = localStorage.getItem(storedIdentityKey);
+		if (!stored) {
+			return "";
+		}
+
+		const parsed = JSON.parse(stored) as Partial<ProtectedPrivateKeyFile>;
+		return typeof parsed.publicAddress === "string" ? parsed.publicAddress : "";
+	} catch {
+		return "";
+	}
+}
+
+function loadStoredIdentity() {
+	try {
+		const stored = localStorage.getItem(storedIdentityKey);
+		if (!stored) {
+			return null;
+		}
+
+		const keyFile = parseProtectedPrivateKeyFile(stored);
+		const fileName =
+			localStorage.getItem(storedIdentityFileNameKey) ||
+			`sapphire-labs-${keyFile.publicAddress}.json`;
+
+		return { fileName, keyFile };
+	} catch {
+		return null;
 	}
 }
 
@@ -3269,7 +4534,10 @@ function toNotice(error: unknown, fallback: string): Notice {
 function App() {
 	return (
 		<Routes>
-			<Route path="/*" element={<HomePage />} />
+			<Route path="/" element={<Navigate replace to="/local" />} />
+			<Route path="/local" element={<HomePage />} />
+			<Route path="/blockchain" element={<BlockchainPage />} />
+			<Route path="*" element={<Navigate replace to="/local" />} />
 		</Routes>
 	);
 }
