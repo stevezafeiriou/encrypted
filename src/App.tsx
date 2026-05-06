@@ -41,15 +41,10 @@ import {
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import sapphireLogo from "./assets/sapphire_logo.png";
-import {
-	connectWallet,
-	decryptBlockchainPayload,
-	encryptBlockchainPayload,
-	inspectBlockchainPackage,
-	parseBlockchainProfile,
-	type BlockchainDecryptionResult,
-	type BlockchainPublicProfile,
-	type BlockchainSession,
+import type {
+	BlockchainDecryptionResult,
+	BlockchainPublicProfile,
+	BlockchainSession,
 } from "./lib/blockchainCrypto";
 import {
 	decryptPayload,
@@ -153,6 +148,10 @@ const chatPlaceholders = [
 	"Decrypt a Sapphire message package",
 	"Use your address book to select a recipient",
 ];
+
+function loadBlockchainCrypto() {
+	return import("./lib/blockchainCrypto");
+}
 const voiceBars = [5, 10, 7, 13, 8, 15, 6, 12, 9, 14, 7, 11];
 const guideMessage = `How Encrypted by Sapphire works
 
@@ -1109,6 +1108,7 @@ function BlockchainPage() {
 		setIsConnecting(true);
 
 		try {
+			const { connectWallet } = await loadBlockchainCrypto();
 			const walletSession = await connectWallet();
 			setSession(walletSession);
 			pushMessage({
@@ -1147,7 +1147,7 @@ function BlockchainPage() {
 		});
 	}
 
-	function handleRecipientProfileChange(value: string) {
+	async function handleRecipientProfileChange(value: string) {
 		setRecipientProfileText(value);
 
 		try {
@@ -1156,6 +1156,7 @@ function BlockchainPage() {
 				return;
 			}
 
+			const { parseBlockchainProfile } = await loadBlockchainCrypto();
 			const profile = parseBlockchainProfile(value);
 			setRecipientProfile(profile);
 			setNotice(null);
@@ -1285,6 +1286,8 @@ function BlockchainPage() {
 		pushMessage({ role: "assistant", type: "typing" });
 
 		try {
+			const { decryptBlockchainPayload, inspectBlockchainPackage } =
+				await loadBlockchainCrypto();
 			const inspection = await inspectBlockchainPackage(packageJson);
 			if (!inspection.hashValid) {
 				throw new Error("This blockchain package failed integrity checks.");
@@ -1351,6 +1354,7 @@ function BlockchainPage() {
 				throw new Error("Paste the recipient wallet encryption profile first.");
 			}
 
+			const { encryptBlockchainPayload } = await loadBlockchainCrypto();
 			const result = await encryptBlockchainPayload({
 				payload: getPayload(),
 				recipientProfile,
@@ -1507,7 +1511,7 @@ function BlockchainComposer({
 	onInputChange: (value: string) => void;
 	onModeChange: (mode: "encrypt" | "decrypt") => void;
 	onPackageUpload: (file: File) => Promise<void>;
-	onRecipientProfileChange: (value: string) => void;
+	onRecipientProfileChange: (value: string) => Promise<void>;
 	onRemoveAttachment: (id: string) => void;
 	onSend: () => void;
 	onToggleRecording: () => void;
@@ -1615,7 +1619,7 @@ function BlockchainComposer({
 								className="hidden max-w-44 items-center gap-2 rounded-full bg-muted px-3 py-1 text-xs font-semibold transition hover:bg-gray-200 sm:inline-flex"
 								type="button"
 								title="Change recipient"
-								onClick={() => onRecipientProfileChange("")}
+								onClick={() => void onRecipientProfileChange("")}
 							>
 								<span className="text-muted-foreground">To</span>
 								<span className="truncate font-mono">
@@ -1706,7 +1710,7 @@ function BlockchainComposer({
 									value={recipientProfileText}
 									placeholder="Paste the recipient's public encryption profile JSON"
 									onChange={(event) =>
-										onRecipientProfileChange(event.target.value)
+										void onRecipientProfileChange(event.target.value)
 									}
 								/>
 							</label>
@@ -2239,6 +2243,8 @@ function ModeSelect() {
 						<button
 							className="identity-menu-item"
 							type="button"
+							onFocus={() => void loadBlockchainCrypto()}
+							onMouseEnter={() => void loadBlockchainCrypto()}
 							onClick={() => selectMode("/blockchain")}
 						>
 							Blockchain
